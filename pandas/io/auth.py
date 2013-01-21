@@ -124,6 +124,12 @@ def authenticate(flow, storage=None):
 
 def init_service(http, service, version):
     """
-    Use the given http object to build the analytics service object
+    Use the given http object to build the service object for a given service
+
+    Parameters
+    ----------
+    http : http object
+    service : name of google service (latitude, analytics, etc)
+    version : api version. eg 'v2'
     """
     return gapi.build(service, version, http=http)
