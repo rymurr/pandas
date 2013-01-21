@@ -122,8 +122,8 @@ def authenticate(flow, storage=None):
     return http
 
 
-def init_service(http):
+def init_service(http, service, version):
     """
     Use the given http object to build the analytics service object
     """
-    return gapi.build('analytics', 'v3', http=http)
+    return gapi.build(service, version, http=http)

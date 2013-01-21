@@ -159,22 +159,23 @@ class GDataReader(OAuthDataReader):
     """
     def __init__(self, scope=auth.DEFAULT_SCOPE,
                  token_file_name=auth.DEFAULT_TOKEN_FILE,
-                 redirect=NO_CALLBACK, secrets=auth.DEFAULT_SECRETS):
+                 redirect=NO_CALLBACK, secrets=auth.DEFAULT_SECRETS, version='v3', service='analytics'):
         super(GDataReader, self).__init__(scope, token_file_name, redirect)
-        self._service = self._init_service(secrets)
+        self._service = self._init_service(secrets, service, version)
 
     @property
     def service(self):
         """The authenticated request service object"""
         return self._service
 
-    def _init_service(self, secrets):
+    def _init_service(self, secrets, service, version):
         """
         Build an authenticated google api request service using the given
         secrets file
         """
         http = self.authenticate(secrets)
-        return auth.init_service(http)
+        return auth.init_service(http, service, version)
+
 
     def get_account(self, name=None, id=None, **kwargs):
         """
