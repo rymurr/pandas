@@ -2,6 +2,7 @@
 SQL-style merge routines
 """
 
+import itertools
 import numpy as np
 
 from pandas.core.categorical import Factor
@@ -208,23 +209,26 @@ class _MergeOperation(object):
             if name in result:
                 key_col = result[name]
 
-                if name in self.left and left_indexer is not None:
-                    na_indexer = (left_indexer == -1).nonzero()[0]
-                    if len(na_indexer) == 0:
-                        continue
+                if left_indexer is not None and right_indexer is not None:
 
-                    right_na_indexer = right_indexer.take(na_indexer)
-                    key_col.put(
-                        na_indexer, com.take_1d(self.right_join_keys[i],
-                                                right_na_indexer))
-                elif name in self.right and right_indexer is not None:
-                    na_indexer = (right_indexer == -1).nonzero()[0]
-                    if len(na_indexer) == 0:
-                        continue
+                    if name in self.left:
+                        na_indexer = (left_indexer == -1).nonzero()[0]
+                        if len(na_indexer) == 0:
+                            continue
 
-                    left_na_indexer = left_indexer.take(na_indexer)
-                    key_col.put(na_indexer, com.take_1d(self.left_join_keys[i],
-                                                        left_na_indexer))
+                        right_na_indexer = right_indexer.take(na_indexer)
+                        key_col.put(
+                            na_indexer, com.take_1d(self.right_join_keys[i],
+                                                    right_na_indexer))
+                    elif name in self.right:
+                        na_indexer = (right_indexer == -1).nonzero()[0]
+                        if len(na_indexer) == 0:
+                            continue
+
+                        left_na_indexer = left_indexer.take(na_indexer)
+                        key_col.put(na_indexer, com.take_1d(self.left_join_keys[i],
+                                                            left_na_indexer))
+
             elif left_indexer is not None:
                 if name is None:
                     name = 'key_%d' % i
@@ -378,6 +382,14 @@ class _MergeOperation(object):
                 if self.left_on is None:
                     raise MergeError('Must pass left_on or left_index=True')
             else:
+                if not self.left.columns.is_unique:
+                    raise MergeError("Left data columns not unique: %s"
+                                     % repr(self.left.columns))
+
+                if not self.right.columns.is_unique:
+                    raise MergeError("Right data columns not unique: %s"
+                                     % repr(self.right.columns))
+
                 # use the common columns
                 common_cols = self.left.columns.intersection(
                     self.right.columns)
@@ -425,18 +437,20 @@ def _get_join_indexers(left_keys, right_keys, sort=False, how='inner'):
         right_labels.append(rlab)
         group_sizes.append(count)
 
-    left_group_key = get_group_index(left_labels, group_sizes)
-    right_group_key = get_group_index(right_labels, group_sizes)
-
     max_groups = 1L
     for x in group_sizes:
         max_groups *= long(x)
 
     if max_groups > 2 ** 63:  # pragma: no cover
-        raise MergeError('Combinatorial explosion! (boom)')
+        left_group_key, right_group_key, max_groups = \
+            _factorize_keys(lib.fast_zip(left_labels),
+                            lib.fast_zip(right_labels))
+    else:
+        left_group_key = get_group_index(left_labels, group_sizes)
+        right_group_key = get_group_index(right_labels, group_sizes)
 
-    left_group_key, right_group_key, max_groups = \
-        _factorize_keys(left_group_key, right_group_key, sort=sort)
+        left_group_key, right_group_key, max_groups = \
+            _factorize_keys(left_group_key, right_group_key, sort=sort)
 
     join_func = _join_functions[how]
     return join_func(left_group_key, right_group_key, max_groups)
@@ -648,7 +662,7 @@ class _BlockJoinOperation(object):
             join_blocks = unit.get_upcasted_blocks()
             type_map = {}
             for blk in join_blocks:
-                type_map.setdefault(type(blk), []).append(blk)
+                type_map.setdefault(blk.dtype, []).append(blk)
             blockmaps.append((unit, type_map))
 
         return blockmaps
@@ -704,18 +718,7 @@ class _BlockJoinOperation(object):
         sofar = 0
         for unit, blk in merge_chunks:
             out_chunk = out[sofar: sofar + len(blk)]
-
-            if unit.indexer is None:
-            # is this really faster than assigning to arr.flat?
-                com.take_fast(blk.values, np.arange(n, dtype=np.int64),
-                              None, False,
-                              axis=self.axis, out=out_chunk)
-            else:
-                # write out the values to the result array
-                com.take_fast(blk.values, unit.indexer,
-                              None, False,
-                              axis=self.axis, out=out_chunk)
-
+            com.take_nd(blk.values, unit.indexer, self.axis, out=out_chunk)
             sofar += len(blk)
 
         # does not sort
@@ -735,39 +738,24 @@ class _JoinUnit(object):
     @cache_readonly
     def mask_info(self):
         if self.indexer is None or not _may_need_upcasting(self.blocks):
-            mask = None
-            need_masking = False
+            return None
         else:
             mask = self.indexer == -1
-            need_masking = mask.any()
-
-        return mask, need_masking
-
-    @property
-    def need_masking(self):
-        return self.mask_info[1]
+            needs_masking = mask.any()
+            return (mask, needs_masking)
 
     def get_upcasted_blocks(self):
-        # will short-circuit and not compute lneed_masking if indexer is None
-        if self.need_masking:
+        # will short-circuit and not compute needs_masking if indexer is None
+        if self.mask_info is not None and self.mask_info[1]:
             return _upcast_blocks(self.blocks)
         return self.blocks
 
     def reindex_block(self, block, axis, ref_items, copy=True):
-        # still some inefficiency here for bool/int64 because in the case where
-        # no masking is needed, take_fast will recompute the mask
-
-        mask, need_masking = self.mask_info
-
         if self.indexer is None:
-            if copy:
-                result = block.copy()
-            else:
-                result = block
+            result = block.copy() if copy else block
         else:
-            result = block.reindex_axis(self.indexer, mask, need_masking,
-                                        axis=axis)
-
+            result = block.reindex_axis(self.indexer, axis=axis,
+                                        mask_info=self.mask_info)
         result.ref_items = ref_items
         return result
 
@@ -959,9 +947,10 @@ class _Concatenator(object):
             name = com._consensus_name_attr(self.objs)
             return Series(new_data, index=self.new_axes[0], name=name)
         elif self._is_series:
-            data = dict(zip(self.new_axes[1], self.objs))
-            return DataFrame(data, index=self.new_axes[0],
-                             columns=self.new_axes[1])
+            data = dict(itertools.izip(xrange(len(self.objs)), self.objs))
+            tmpdf = DataFrame(data, index=self.new_axes[0])
+            tmpdf.columns = self.new_axes[1]
+            return tmpdf
         else:
             new_data = self._get_concatenated_data()
             return self.objs[0]._from_axes(new_data, self.new_axes)
@@ -975,7 +964,8 @@ class _Concatenator(object):
         blockmaps = []
         for data in reindexed_data:
             data = data.consolidate()
-            type_map = dict((type(blk), blk) for blk in data.blocks)
+
+            type_map = dict((blk.dtype, blk) for blk in data.blocks)
             blockmaps.append(type_map)
         return blockmaps, reindexed_data
 

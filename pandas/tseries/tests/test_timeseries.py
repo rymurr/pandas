@@ -18,6 +18,7 @@ from pandas.core.daterange import DateRange
 import pandas.core.datetools as datetools
 import pandas.tseries.offsets as offsets
 import pandas.tseries.frequencies as fmod
+import pandas as pd
 
 from pandas.util.testing import assert_series_equal, assert_almost_equal
 import pandas.util.testing as tm
@@ -39,6 +40,13 @@ from pandas.core.datetools import BDay
 import pandas.core.common as com
 
 from numpy.testing.decorators import slow
+
+
+def _skip_if_no_pytz():
+    try:
+        import pytz
+    except ImportError:
+        raise nose.SkipTest
 
 
 class TestTimeSeriesDuplicates(unittest.TestCase):
@@ -165,13 +173,6 @@ def assert_range_equal(left, right):
     assert(left.equals(right))
     assert(left.freq == right.freq)
     assert(left.tz == right.tz)
-
-
-def _skip_if_no_pytz():
-    try:
-        import pytz
-    except ImportError:
-        raise nose.SkipTest
 
 
 class TestTimeSeries(unittest.TestCase):
@@ -566,7 +567,8 @@ class TestTimeSeries(unittest.TestCase):
         expected = ('0          1970-01-01 00:00:00\n'
                     '1   1970-01-01 00:00:00.000001\n'
                     '2   1970-01-01 00:00:00.000002\n'
-                    '3                          NaT')
+                    '3                          NaT\n'
+                    'dtype: datetime64[ns]')
         self.assertEquals(result, expected)
 
     def test_fillna_nat(self):
@@ -672,6 +674,25 @@ class TestTimeSeries(unittest.TestCase):
         rs = to_datetime('2001')
         xp = datetime(2001, 1, 1)
         self.assert_(rs, xp)
+
+    def test_to_datetime_format(self):
+        values = ['1/1/2000', '1/2/2000', '1/3/2000']
+
+        def _parse_format(fmt, values):
+            return to_datetime([datetime.strptime(x, fmt)
+                                for x in values])
+
+        for fmt in ['%d/%m/%Y', '%m/%d/%Y']:
+            result = to_datetime(values, format=fmt)
+            expected = _parse_format(fmt, values)
+            self.assert_(result.equals(expected))
+
+    def test_to_datetime_on_datetime64_series(self):
+        # #2699
+        s = Series(date_range('1/1/2000', periods=10))
+
+        result = to_datetime(s)
+        self.assertEquals(result[0], s[0])
 
     def test_nat_vector_field_access(self):
         idx = DatetimeIndex(['1/1/2000', None, None, '1/4/2000'])
@@ -1244,11 +1265,31 @@ class TestTimeSeries(unittest.TestCase):
         self.assert_(rng1.append(rng1).name == 'foo')
         self.assert_(rng1.append(rng2).name is None)
 
+    def test_append_concat_tz(self):
+        #GH 2938
+        _skip_if_no_pytz()
+
+        rng = date_range('5/8/2012 1:45', periods=10, freq='5T',
+                         tz='US/Eastern')
+        rng2 = date_range('5/8/2012 2:35', periods=10, freq='5T',
+                         tz='US/Eastern')
+        rng3 = date_range('5/8/2012 1:45', periods=20, freq='5T',
+                         tz='US/Eastern')
+        ts = Series(np.random.randn(len(rng)), rng)
+        df = DataFrame(np.random.randn(len(rng), 4), index=rng)
+        ts2 = Series(np.random.randn(len(rng2)), rng2)
+        df2 = DataFrame(np.random.randn(len(rng2), 4), index=rng2)
+
+        result = ts.append(ts2)
+        result_df = df.append(df2)
+        self.assert_(result.index.equals(rng3))
+        self.assert_(result_df.index.equals(rng3))
+
+        appended = rng.append(rng2)
+        self.assert_(appended.equals(rng3))
+
     def test_set_dataframe_column_ns_dtype(self):
         x = DataFrame([datetime.now(), datetime.now()])
-        # self.assert_(x[0].dtype == object)
-
-        # x[0] = to_datetime(x[0])
         self.assert_(x[0].dtype == np.dtype('M8[ns]'))
 
     def test_groupby_count_dateparseerror(self):
@@ -1308,7 +1349,6 @@ class TestTimeSeries(unittest.TestCase):
 
     def test_series_interpolate_intraday(self):
         # #1698
-        import pandas as pd
         index = pd.date_range('1/1/2012', periods=4, freq='12D')
         ts = pd.Series([0, 12, 24, 36], index)
         new_index = index.append(index + pd.DateOffset(days=1)).order()
@@ -1389,6 +1429,32 @@ class TestTimeSeries(unittest.TestCase):
 
         result = buf.getvalue()
         self.assert_('2000-01-01' in result)
+
+    def test_series_map_box_timestamps(self):
+        # #2689, #2627
+        s = Series(date_range('1/1/2000', periods=10))
+
+        def f(x):
+            return (x.hour, x.day, x.month)
+
+        # it works!
+        s.map(f)
+        s.apply(f)
+        DataFrame(s).applymap(f)
+
+    def test_concat_datetime_datetime64_frame(self):
+        # #2624
+        rows = []
+        rows.append([datetime(2010, 1, 1), 1])
+        rows.append([datetime(2010, 1, 2), 'hi'])
+
+        df2_obj = DataFrame.from_records(rows, columns=['date', 'test'])
+
+        ind = date_range(start="2000/1/1", freq="D", periods=10)
+        df1 = DataFrame({'date': ind, 'test':range(10)})
+
+        # it works!
+        pd.concat([df1, df2_obj])
 
 
 def _simple_ts(start, end, freq='D'):
@@ -2305,7 +2371,7 @@ class TestDatetime64(unittest.TestCase):
         d2 = d1.reset_index()
         self.assert_(d2.dtypes[0] == np.dtype('M8[ns]'))
         d3 = d2.set_index('index')
-        assert_frame_equal(d1, d3)
+        assert_frame_equal(d1, d3, check_names=False)
 
         # #2329
         stamp = datetime(2012, 11, 22)
@@ -2358,7 +2424,7 @@ class TestSeriesDatetime64(unittest.TestCase):
 
     def test_auto_conversion(self):
         series = Series(list(date_range('1/1/2000', periods=10)))
-        self.assert_(series.dtype == object)
+        self.assert_(series.dtype == 'M8[ns]')
 
     def test_constructor_cant_cast_datetime64(self):
         self.assertRaises(TypeError, Series,
@@ -2408,13 +2474,17 @@ class TestSeriesDatetime64(unittest.TestCase):
         self.assert_(self.series[6] is NaT)
 
     def test_intercept_astype_object(self):
-        # Work around NumPy 1.6 bugs
-        result = self.series.astype(object)
-        result2 = self.series.astype('O')
-        expected = Series([x for x in self.series], dtype=object)
 
-        assert_series_equal(result, expected)
-        assert_series_equal(result2, expected)
+        # this test no longer makes sense as series is by default already M8[ns]
+
+        # Work around NumPy 1.6 bugs
+        #result = self.series.astype(object)
+        #result2 = self.series.astype('O')
+
+        expected = Series(self.series, dtype=object)
+
+        #assert_series_equal(result, expected)
+        #assert_series_equal(result2, expected)
 
         df = DataFrame({'a': self.series,
                         'b': np.random.randn(len(self.series))})

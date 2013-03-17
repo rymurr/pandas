@@ -34,8 +34,13 @@ def _skip_if_no_scipy():
     except ImportError:
         raise nose.SkipTest
 
+def _skip_if_no_pytz():
+    try:
+        import pytz
+    except ImportError:
+        raise nose.SkipTest
 
-#-------------------------------------------------------------------------------
+#------------------------------------------------------------------------------
 # Series test cases
 
 JOIN_TYPES = ['inner', 'outer', 'left', 'right']
@@ -84,6 +89,20 @@ class CheckNameIntegration(object):
         result = self.ts.combine_first(self.ts[:5])
         self.assertEquals(result.name, self.ts.name)
 
+    def test_combine_first_dt64(self):
+        from pandas.tseries.tools import to_datetime
+        s0 = to_datetime(Series(["2010", np.NaN]))
+        s1 = to_datetime(Series([np.NaN, "2011"]))
+        rs = s0.combine_first(s1)
+        xp = to_datetime(Series(['2010', '2011']))
+        assert_series_equal(rs, xp)
+
+        s0 = to_datetime(Series(["2010", np.NaN]))
+        s1 = Series([np.NaN, "2011"])
+        rs = s0.combine_first(s1)
+        xp = Series([datetime(2010, 1, 1), '2011'])
+        assert_series_equal(rs, xp)
+
     def test_getitem_preserve_name(self):
         result = self.ts[self.ts > 0]
         self.assertEquals(result.name, self.ts.name)
@@ -123,7 +142,7 @@ class CheckNameIntegration(object):
                     "qux    one       7",
                     "       two       8",
                     "       three     9",
-                    "Name: sth"]
+                    "Name: sth, dtype: int64"]
         expected = "\n".join(expected)
         self.assertEquals(repr(s), expected)
 
@@ -235,6 +254,9 @@ class TestSeries(unittest.TestCase, CheckNameIntegration):
     _multiprocess_can_split_ = True
 
     def setUp(self):
+        import warnings
+        warnings.filterwarnings(action='ignore', category=FutureWarning)
+
         self.ts = _ts.copy()
         self.ts.name = 'ts'
 
@@ -320,6 +342,65 @@ class TestSeries(unittest.TestCase, CheckNameIntegration):
         expected = Series([0.0, nan, 2.0], index=index)
         assert_series_equal(result, expected)
 
+        data[1] = 1.0
+        result = Series(data, index=index)
+        expected = Series([0.0, 1.0, 2.0], index=index)
+        assert_series_equal(result, expected)
+
+        data = ma.masked_all((3,), dtype=int)
+        result = Series(data)
+        expected = Series([nan, nan, nan], dtype=float)
+        assert_series_equal(result, expected)
+
+        data[0] = 0
+        data[2] = 2
+        index = ['a', 'b', 'c']
+        result = Series(data, index=index)
+        expected = Series([0, nan, 2], index=index, dtype=float)
+        assert_series_equal(result, expected)
+
+        data[1] = 1
+        result = Series(data, index=index)
+        expected = Series([0, 1, 2], index=index, dtype=int)
+        assert_series_equal(result, expected)
+
+        data = ma.masked_all((3,), dtype=bool)
+        result = Series(data)
+        expected = Series([nan, nan, nan], dtype=object)
+        assert_series_equal(result, expected)
+
+        data[0] = True
+        data[2] = False
+        index = ['a', 'b', 'c']
+        result = Series(data, index=index)
+        expected = Series([True, nan, False], index=index, dtype=object)
+        assert_series_equal(result, expected)
+
+        data[1] = True
+        result = Series(data, index=index)
+        expected = Series([True, True, False], index=index, dtype=bool)
+        assert_series_equal(result, expected)
+
+        from pandas import tslib
+        data = ma.masked_all((3,), dtype='M8[ns]')
+        result = Series(data)
+        expected = Series([tslib.iNaT, tslib.iNaT, tslib.iNaT], dtype='M8[ns]')
+        assert_series_equal(result, expected)
+
+        data[0] = datetime(2001, 1, 1)
+        data[2] = datetime(2001, 1, 3)
+        index = ['a', 'b', 'c']
+        result = Series(data, index=index)
+        expected = Series([datetime(2001, 1, 1), tslib.iNaT,
+                           datetime(2001, 1, 3)], index=index, dtype='M8[ns]')
+        assert_series_equal(result, expected)
+
+        data[1] = datetime(2001, 1, 2)
+        result = Series(data, index=index)
+        expected = Series([datetime(2001, 1, 1), datetime(2001, 1, 2),
+                           datetime(2001, 1, 3)], index=index, dtype='M8[ns]')
+        assert_series_equal(result, expected)
+
     def test_constructor_default_index(self):
         s = Series([0, 1, 2])
         assert_almost_equal(s.index, np.arange(3))
@@ -362,8 +443,10 @@ class TestSeries(unittest.TestCase, CheckNameIntegration):
         s = Series(tslib.iNaT, dtype='M8[ns]', index=range(5))
         self.assert_(isnull(s).all() == True)
 
-        s = Series(tslib.NaT, dtype='M8[ns]', index=range(5))
-        self.assert_(isnull(s).all() == True)
+        #### in theory this should be all nulls, but since
+        #### we are not specifying a dtype is ambiguous
+        s = Series(tslib.iNaT, index=range(5))
+        self.assert_(isnull(s).all() == False)
 
         s = Series(nan, dtype='M8[ns]', index=range(5))
         self.assert_(isnull(s).all() == True)
@@ -503,6 +586,7 @@ class TestSeries(unittest.TestCase, CheckNameIntegration):
         pass
 
     def test_fromValue(self):
+
         nans = Series(np.NaN, index=self.ts.index)
         self.assert_(nans.dtype == np.float_)
         self.assertEqual(len(nans), len(self.ts))
@@ -513,7 +597,7 @@ class TestSeries(unittest.TestCase, CheckNameIntegration):
 
         d = datetime.now()
         dates = Series(d, index=self.ts.index)
-        self.assert_(dates.dtype == np.object_)
+        self.assert_(dates.dtype == 'M8[ns]')
         self.assertEqual(len(dates), len(self.ts))
 
     def test_contains(self):
@@ -1001,9 +1085,7 @@ class TestSeries(unittest.TestCase, CheckNameIntegration):
 
         rs = s.copy()
 
-        res = rs.where(cond, inplace=True)
-        self.assertTrue(res is None)
-
+        rs.where(cond, inplace=True)
         assert_series_equal(rs.dropna(), s[cond])
         assert_series_equal(rs, s.where(cond))
 
@@ -1043,6 +1125,22 @@ class TestSeries(unittest.TestCase, CheckNameIntegration):
         self.series.ix[d2] = 6
         self.assertEquals(self.series[d1], 4)
         self.assertEquals(self.series[d2], 6)
+
+    def test_setitem_boolean(self):
+        mask = self.series > self.series.median()
+
+        # similiar indexed series
+        result = self.series.copy()
+        result[mask] = self.series*2
+        expected = self.series*2
+        assert_series_equal(result[mask], expected[mask])
+
+        # needs alignment
+        result = self.series.copy()
+        result[mask] = (self.series*2)[0:5]
+        expected = (self.series*2)[0:5].reindex_like(self.series)
+        expected[-mask] = self.series[mask]
+        assert_series_equal(result[mask], expected[mask])
 
     def test_ix_setitem_boolean(self):
         mask = self.series > self.series.median()
@@ -1306,6 +1404,21 @@ class TestSeries(unittest.TestCase, CheckNameIntegration):
         argsorted = self.ts.argsort()
         self.assert_(issubclass(argsorted.dtype.type, np.integer))
 
+        # GH 2967 (introduced bug in 0.11-dev I think)
+        s = Series([Timestamp('201301%02d'% (i+1)) for i in range(5)])
+        self.assert_(s.dtype == 'datetime64[ns]')
+        shifted = s.shift(-1)
+        self.assert_(shifted.dtype == 'datetime64[ns]')
+        self.assert_(isnull(shifted[4]) == True)
+
+        result = s.argsort()
+        expected = Series(range(5),dtype='int64')
+        assert_series_equal(result,expected)
+
+        result = shifted.argsort()
+        expected = Series(range(4) + [-1],dtype='int64')
+        assert_series_equal(result,expected)
+
     def test_argsort_stable(self):
         s = Series(np.random.randint(0, 100, size=10000))
         mindexer = s.argsort(kind='mergesort')
@@ -1364,7 +1477,8 @@ class TestSeries(unittest.TestCase, CheckNameIntegration):
 
             # check the result is correct
             nona = self.series.dropna()
-            assert_almost_equal(f(nona), alternate(nona))
+            assert_almost_equal(f(nona), alternate(nona.values))
+            assert_almost_equal(f(self.series), alternate(nona.values))
 
             allna = self.series * nan
             self.assert_(np.isnan(f(allna)))
@@ -1372,6 +1486,12 @@ class TestSeries(unittest.TestCase, CheckNameIntegration):
             # dtype=object with None, it works!
             s = Series([1, 2, 3, None, 5])
             f(s)
+
+            # 2888
+            l = [0]
+            l.extend(list(range(2**40,2**40+1000)))
+            s = Series(l, dtype='int64')
+            assert_almost_equal(float(f(s)), float(alternate(s.values)))
 
             # check date range
             if check_objects:
@@ -1517,6 +1637,12 @@ class TestSeries(unittest.TestCase, CheckNameIntegration):
         check(self.ts, self.ts[::2])
         check(self.ts, 5)
 
+    def test_neg(self):
+        assert_series_equal(-self.series, -1 * self.series)
+
+    def test_invert(self):
+        assert_series_equal(-(self.series < 0), ~(self.series < 0))
+
     def test_operators(self):
 
         def _check_op(series, other, op, pos_only=False):
@@ -1564,6 +1690,201 @@ class TestSeries(unittest.TestCase, CheckNameIntegration):
 
         # it works!
         _ = s1 * s2
+
+    def test_constructor_dtype_timedelta64(self):
+
+        td = Series([ timedelta(days=i) for i in range(3) ])
+        self.assert_(td.dtype=='timedelta64[ns]')
+
+        # mixed with NaT
+        from pandas import tslib
+        td = Series([ timedelta(days=i) for i in range(3) ] + [ tslib.NaT ], dtype='m8[ns]' )
+        self.assert_(td.dtype=='timedelta64[ns]')
+
+        td = Series([ timedelta(days=i) for i in range(3) ] + [ tslib.iNaT ], dtype='m8[ns]' )
+        self.assert_(td.dtype=='timedelta64[ns]')
+
+        td = Series([ timedelta(days=i) for i in range(3) ] + [ np.nan ], dtype='m8[ns]' )
+        self.assert_(td.dtype=='timedelta64[ns]')
+
+        # this is an invalid casting
+        self.assertRaises(Exception, Series, [ timedelta(days=i) for i in range(3) ] + [ 'foo' ], dtype='m8[ns]' )
+
+        # leave as object here
+        td = Series([ timedelta(days=i) for i in range(3) ] + [ 'foo' ])
+        self.assert_(td.dtype=='object')
+
+    def test_operators_timedelta64(self):
+
+        # invalid ops
+        self.assertRaises(Exception, self.objSeries.__add__, 1)
+        self.assertRaises(Exception, self.objSeries.__add__, np.array(1,dtype=np.int64))
+        self.assertRaises(Exception, self.objSeries.__sub__, 1)
+        self.assertRaises(Exception, self.objSeries.__sub__, np.array(1,dtype=np.int64))
+
+        # seriese ops
+        v1 = date_range('2012-1-1', periods=3, freq='D')
+        v2 = date_range('2012-1-2', periods=3, freq='D')
+        rs = Series(v2) - Series(v1)
+        xp = Series(1e9 * 3600 * 24, rs.index).astype('timedelta64[ns]')
+        assert_series_equal(rs, xp)
+        self.assert_(rs.dtype=='timedelta64[ns]')
+
+        df = DataFrame(dict(A = v1))
+        td = Series([ timedelta(days=i) for i in range(3) ])
+        self.assert_(td.dtype=='timedelta64[ns]')
+
+        # series on the rhs
+        result = df['A'] - df['A'].shift()
+        self.assert_(result.dtype=='timedelta64[ns]')
+
+        result = df['A'] + td
+        self.assert_(result.dtype=='M8[ns]')
+
+        # scalar Timestamp on rhs
+        maxa = df['A'].max()
+        self.assert_(isinstance(maxa,Timestamp))
+
+        resultb = df['A']- df['A'].max()
+        self.assert_(resultb.dtype=='timedelta64[ns]')
+
+        # timestamp on lhs
+        result = resultb + df['A']
+        expected = Series([Timestamp('20111230'),Timestamp('20120101'),Timestamp('20120103')])
+        assert_series_equal(result,expected)
+
+        # datetimes on rhs
+        result = df['A'] - datetime(2001,1,1)
+        expected = Series([timedelta(days=4017+i) for i in range(3)])
+        assert_series_equal(result,expected)
+        self.assert_(result.dtype=='m8[ns]')
+        
+        result = df['A'] + datetime(2001,1,1)
+        expected = Series([timedelta(days=26663+i) for i in range(3)])
+        assert_series_equal(result,expected)
+        self.assert_(result.dtype=='m8[ns]')
+
+        d = datetime(2001,1,1,3,4)
+        resulta = df['A'] - d
+        self.assert_(resulta.dtype=='m8[ns]')
+        
+        resultb = df['A'] + d
+        self.assert_(resultb.dtype=='m8[ns]')
+
+        # roundtrip
+        resultb = resulta + d
+        assert_series_equal(df['A'],resultb)
+
+        # timedelta on lhs
+        result = resultb + d
+        self.assert_(result.dtype=='m8[ns]')
+
+        # timedeltas on rhs
+        td = timedelta(days=1)
+        resulta = df['A'] + td
+        resultb = resulta - td
+        assert_series_equal(resultb,df['A'])
+        self.assert_(resultb.dtype=='M8[ns]')
+
+        # roundtrip
+        td = timedelta(minutes=5,seconds=3)
+        resulta = df['A'] + td
+        resultb = resulta - td
+        assert_series_equal(df['A'],resultb)
+        self.assert_(resultb.dtype=='M8[ns]')
+
+        # td operate with td
+        td1 = Series([timedelta(minutes=5,seconds=3)]*3)
+        td2 = timedelta(minutes=5,seconds=4)
+        result = td1-td2
+        expected = Series([timedelta(seconds=0)]*3)-Series([timedelta(seconds=1)]*3)
+        self.assert_(result.dtype=='m8[ns]')
+        assert_series_equal(result,expected)
+
+
+    def test_timedelta64_functions(self):
+
+        from datetime import timedelta
+        from pandas import date_range
+
+        # index min/max
+        td = Series(date_range('2012-1-1', periods=3, freq='D'))-Timestamp('20120101')
+
+        result = td.idxmin()
+        self.assert_(result == 0)
+
+        result = td.idxmax()
+        self.assert_(result == 2)
+
+        # GH 2982
+        # with NaT 
+        td[0] = np.nan
+
+        result = td.idxmin()
+        self.assert_(result == 1)
+
+        result = td.idxmax()
+        self.assert_(result == 2)
+
+        # abs
+        s1 = Series(date_range('20120101',periods=3))
+        s2 = Series(date_range('20120102',periods=3))
+        expected = Series(s2-s1)
+
+        # this fails as numpy returns timedelta64[us]
+        #result = np.abs(s1-s2)
+        #assert_frame_equal(result,expected)
+
+        result = (s1-s2).abs()
+        assert_series_equal(result,expected)
+
+        # max/min
+        result = td.max()
+        expected = Series([timedelta(2)],dtype='timedelta64[ns]')
+        assert_series_equal(result,expected)
+
+        result = td.min()
+        expected = Series([timedelta(1)],dtype='timedelta64[ns]')
+        assert_series_equal(result,expected)
+
+    def test_sub_of_datetime_from_TimeSeries(self): 
+        from pandas.core import common as com
+        from datetime import datetime 
+        a = Timestamp(datetime(1993,01,07,13,30,00)) 
+        b = datetime(1993, 6, 22, 13, 30) 
+        a = Series([a])
+        result = com._possibly_cast_to_timedelta(np.abs(a - b)) 
+        self.assert_(result.dtype == 'timedelta64[ns]')
+
+    def test_timedelta64_nan(self):
+
+        from pandas import tslib
+        td = Series([ timedelta(days=i) for i in range(10) ])
+
+        # nan ops on timedeltas
+        td1 = td.copy()
+        td1[0] = np.nan
+        self.assert_(isnull(td1[0]) == True)
+        self.assert_(td1[0].view('i8') == tslib.iNaT)
+        td1[0] = td[0]
+        self.assert_(isnull(td1[0]) == False)
+
+        td1[1] = tslib.iNaT
+        self.assert_(isnull(td1[1]) == True)
+        self.assert_(td1[1].view('i8') == tslib.iNaT)
+        td1[1] = td[1]
+        self.assert_(isnull(td1[1]) == False)
+
+        td1[2] = tslib.NaT
+        self.assert_(isnull(td1[2]) == True)
+        self.assert_(td1[2].view('i8') == tslib.iNaT)
+        td1[2] = td[2]
+        self.assert_(isnull(td1[2]) == False)
+
+        ####  boolean setting
+        #### this doesn't work, not sure numpy even supports it
+        #result = td[(td>np.timedelta64(timedelta(days=3))) & (td<np.timedelta64(timedelta(days=7)))] = np.nan
+        #self.assert_(isnull(result).sum() == 7)
 
     # NumPy limitiation =(
 
@@ -1754,6 +2075,16 @@ class TestSeries(unittest.TestCase, CheckNameIntegration):
         allna = self.series * nan
         self.assert_(isnull(allna.idxmin()))
 
+        # datetime64[ns]
+        from pandas import date_range
+        s = Series(date_range('20130102',periods=6))
+        result = s.idxmin()
+        self.assert_(result == 0)
+
+        s[0] = np.nan
+        result = s.idxmin()
+        self.assert_(result == 1)
+
     def test_idxmax(self):
         # test idxmax
         # _check_stat_op approach can not be used here because of isnull check.
@@ -1775,9 +2106,14 @@ class TestSeries(unittest.TestCase, CheckNameIntegration):
         allna = self.series * nan
         self.assert_(isnull(allna.idxmax()))
 
-    def test_operators_date(self):
-        result = self.objSeries + timedelta(1)
-        result = self.objSeries - timedelta(1)
+        from pandas import date_range
+        s = Series(date_range('20130102',periods=6))
+        result = s.idxmax()
+        self.assert_(result == 5)
+
+        s[5] = np.nan
+        result = s.idxmax()
+        self.assert_(result == 4)
 
     def test_operators_corner(self):
         series = self.ts
@@ -2047,6 +2383,11 @@ class TestSeries(unittest.TestCase, CheckNameIntegration):
         expected = Series([4, 3, 2, 1], index=['b', 'a', 'd', 'c'])
         assert_series_equal(hist, expected)
 
+        # relative histogram.
+        hist = s.value_counts(normalize=True)
+        expected = Series([.4, .3, .2, .1], index=['b', 'a', 'd', 'c'])
+        assert_series_equal(hist, expected)
+
         self.assertEquals(s.nunique(), 4)
 
         # handle NA's properly
@@ -2060,7 +2401,29 @@ class TestSeries(unittest.TestCase, CheckNameIntegration):
         expected = Series([], dtype=np.int64)
         assert_series_equal(hist, expected)
 
+        # GH 3002, datetime64[ns]
+        import StringIO
+        import pandas as pd
+        f = StringIO.StringIO("xxyyzz20100101PIE\nxxyyzz20100101GUM\nxxyyww20090101EGG\nfoofoo20080909PIE")
+        df = pd.read_fwf(f, widths=[6,8,3], names=["person_id", "dt", "food"], parse_dates=["dt"])
+        s = df.dt.copy()
+        result = s.value_counts()
+        self.assert_(result.index.dtype == 'datetime64[ns]')
+
+        # with NaT
+        s = s.append(Series({ 4 : pd.NaT }))
+        result = s.value_counts()
+        self.assert_(result.index.dtype == 'datetime64[ns]')
+
+        # timedelta64[ns]
+        from datetime import timedelta
+        td = df.dt-df.dt+timedelta(1)
+        result = td.value_counts()
+        #self.assert_(result.index.dtype == 'timedelta64[ns]')
+        self.assert_(result.index.dtype == 'int64')
+
     def test_unique(self):
+
         # 714 also, dtype=float
         s = Series([1.2345] * 100)
         s[::2] = np.nan
@@ -2251,8 +2614,6 @@ class TestSeries(unittest.TestCase, CheckNameIntegration):
         # datetime64
         s = Series(self.ts.index)
         rs = s.tolist()
-        xp = s.astype(object).values.tolist()
-        assert_almost_equal(rs, xp)
         self.assertEqual(self.ts.index[0], rs[0])
 
     def test_to_dict(self):
@@ -2500,6 +2861,161 @@ class TestSeries(unittest.TestCase, CheckNameIntegration):
         d = self.ts.index[0] - datetools.bday
         self.assert_(np.isnan(self.ts.asof(d)))
 
+    def test_getitem_setitem_datetimeindex(self):
+        from pandas import date_range
+        N = 50
+        # testing with timezone, GH #2785
+        rng = date_range('1/1/1990', periods=N, freq='H', tz='US/Eastern')
+        ts = Series(np.random.randn(N), index=rng)
+
+        result = ts["1990-01-01 04:00:00"]
+        expected = ts[4]
+        self.assert_(result == expected)
+
+        result = ts.copy()
+        result["1990-01-01 04:00:00"] = 0
+        result["1990-01-01 04:00:00"] = ts[4]
+        assert_series_equal(result, ts)
+
+        result = ts["1990-01-01 04:00:00":"1990-01-01 07:00:00"]
+        expected = ts[4:8]
+        assert_series_equal(result, expected)
+
+        result = ts.copy()
+        result["1990-01-01 04:00:00":"1990-01-01 07:00:00"] = 0
+        result["1990-01-01 04:00:00":"1990-01-01 07:00:00"] = ts[4:8]
+        assert_series_equal(result, ts)
+
+        lb = "1990-01-01 04:00:00"
+        rb = "1990-01-01 07:00:00"
+        result = ts[(ts.index >= lb) & (ts.index <= rb)]
+        expected = ts[4:8]
+        assert_series_equal(result, expected)
+
+        # repeat all the above with naive datetimes
+        result = ts[datetime(1990, 1, 1, 4)]
+        expected = ts[4]
+        self.assert_(result == expected)
+
+        result = ts.copy()
+        result[datetime(1990, 1, 1, 4)] = 0
+        result[datetime(1990, 1, 1, 4)] = ts[4]
+        assert_series_equal(result, ts)
+
+        result = ts[datetime(1990, 1, 1, 4):datetime(1990, 1, 1, 7)]
+        expected = ts[4:8]
+        assert_series_equal(result, expected)
+
+        result = ts.copy()
+        result[datetime(1990, 1, 1, 4):datetime(1990, 1, 1, 7)] = 0
+        result[datetime(1990, 1, 1, 4):datetime(1990, 1, 1, 7)] = ts[4:8]
+        assert_series_equal(result, ts)
+
+        lb = datetime(1990, 1, 1, 4)
+        rb = datetime(1990, 1, 1, 7)
+        result = ts[(ts.index >= lb) & (ts.index <= rb)]
+        expected = ts[4:8]
+        assert_series_equal(result, expected)
+
+        result = ts[ts.index[4]]
+        expected = ts[4]
+        self.assert_(result == expected)
+
+        result = ts[ts.index[4:8]]
+        expected = ts[4:8]
+        assert_series_equal(result, expected)
+
+        result = ts.copy()
+        result[ts.index[4:8]] = 0
+        result[4:8] = ts[4:8]
+        assert_series_equal(result, ts)
+
+        # also test partial date slicing
+        result = ts["1990-01-02"]
+        expected = ts[24:48]
+        assert_series_equal(result, expected)
+
+        result = ts.copy()
+        result["1990-01-02"] = 0
+        result["1990-01-02"] = ts[24:48]
+        assert_series_equal(result, ts)
+
+    def test_getitem_setitem_datetime_tz(self):
+        _skip_if_no_pytz();
+        from pytz import timezone as tz
+
+        from pandas import date_range
+        N = 50
+        # testing with timezone, GH #2785
+        rng = date_range('1/1/1990', periods=N, freq='H', tz='US/Eastern')
+        ts = Series(np.random.randn(N), index=rng)
+
+        # also test Timestamp tz handling, GH #2789
+        result = ts.copy()
+        result["1990-01-01 09:00:00+00:00"] = 0
+        result["1990-01-01 09:00:00+00:00"] = ts[4]
+        assert_series_equal(result, ts)
+
+        result = ts.copy()
+        result["1990-01-01 03:00:00-06:00"] = 0
+        result["1990-01-01 03:00:00-06:00"] = ts[4]
+        assert_series_equal(result, ts)
+
+        # repeat with datetimes
+        result = ts.copy()
+        result[datetime(1990, 1, 1, 9, tzinfo=tz('UTC'))] = 0
+        result[datetime(1990, 1, 1, 9, tzinfo=tz('UTC'))] = ts[4]
+        assert_series_equal(result, ts)
+
+        result = ts.copy()
+        result[datetime(1990, 1, 1, 3, tzinfo=tz('US/Central'))] = 0
+        result[datetime(1990, 1, 1, 3, tzinfo=tz('US/Central'))] = ts[4]
+        assert_series_equal(result, ts)
+
+    def test_getitem_setitem_periodindex(self):
+        from pandas import period_range, Period
+        N = 50
+        rng = period_range('1/1/1990', periods=N, freq='H')
+        ts = Series(np.random.randn(N), index=rng)
+
+        result = ts["1990-01-01 04"]
+        expected = ts[4]
+        self.assert_(result == expected)
+
+        result = ts.copy()
+        result["1990-01-01 04"] = 0
+        result["1990-01-01 04"] = ts[4]
+        assert_series_equal(result, ts)
+
+        result = ts["1990-01-01 04":"1990-01-01 07"]
+        expected = ts[4:8]
+        assert_series_equal(result, expected)
+
+        result = ts.copy()
+        result["1990-01-01 04":"1990-01-01 07"] = 0
+        result["1990-01-01 04":"1990-01-01 07"] = ts[4:8]
+        assert_series_equal(result, ts)
+
+        lb = "1990-01-01 04"
+        rb = "1990-01-01 07"
+        result = ts[(ts.index >= lb) & (ts.index <= rb)]
+        expected = ts[4:8]
+        assert_series_equal(result, expected)
+
+        # GH 2782
+        result = ts[ts.index[4]]
+        expected = ts[4]
+        self.assert_(result == expected)
+
+        result = ts[ts.index[4:8]]
+        expected = ts[4:8]
+        assert_series_equal(result, expected)
+
+        result = ts.copy()
+        result[ts.index[4:8]] = 0
+        result[4:8] = ts[4:8]
+        assert_series_equal(result, ts)
+
     def test_asof_periodindex(self):
         from pandas import period_range, PeriodIndex
         # array or list or dates
@@ -2561,6 +3077,17 @@ class TestSeries(unittest.TestCase, CheckNameIntegration):
         result = s.asof(s.index[0])
         self.assertEqual(result, s[0])
 
+    def test_cast_on_putmask(self):
+
+        # GH 2746
+
+        # need to upcast
+        s = Series([1,2],index=[1,2],dtype='int64')
+        s[[True, False]] = Series([0],index=[1],dtype='int64')
+        expected = Series([0,2],index=[1,2],dtype='float64')
+
+        assert_series_equal(s, expected)
+
     def test_astype_cast_nan_int(self):
         df = Series([1.0, 2.0, 3.0, np.nan])
         self.assertRaises(ValueError, df.astype, np.int64)
@@ -2575,6 +3102,23 @@ class TestSeries(unittest.TestCase, CheckNameIntegration):
         arr = Series(['1', '2', '3', '4'], dtype=object)
         result = arr.astype(int)
         self.assert_(np.array_equal(result, np.arange(1, 5)))
+
+    def test_astype_datetimes(self):
+        import pandas.tslib as tslib
+
+        s = Series(tslib.iNaT, dtype='M8[ns]', index=range(5))
+        s = s.astype('O')
+        self.assert_(s.dtype == np.object_)
+
+        s = Series([datetime(2001, 1, 2, 0, 0)])
+        s = s.astype('O')
+        self.assert_(s.dtype == np.object_)
+
+        s = Series([datetime(2001, 1, 2, 0, 0) for i in range(3)])
+        s[1] = np.nan
+        self.assert_(s.dtype == 'M8[ns]')
+        s = s.astype('O')
+        self.assert_(s.dtype == np.object_)
 
     def test_map(self):
         index, data = tm.getMixedTypeDict()
@@ -2641,6 +3185,16 @@ class TestSeries(unittest.TestCase, CheckNameIntegration):
         expected = DataFrame({'x': self.ts, 'x^2': self.ts ** 2})
         tm.assert_frame_equal(result, expected)
 
+        # empty series
+        s = Series()
+        rs = s.apply(lambda x: x)
+        tm.assert_series_equal(s, rs)
+
+        # index but no data
+        s = Series(index=[1,2,3])
+        rs = s.apply(lambda x: x)
+        tm.assert_series_equal(s, rs)
+
     def test_apply_same_length_inference_bug(self):
         s = Series([1, 2])
         f = lambda x: (x, x + 1)
@@ -2660,6 +3214,64 @@ class TestSeries(unittest.TestCase, CheckNameIntegration):
         f = lambda x: x if x > 0 else np.nan
         result = s.apply(f, convert_dtype=False)
         self.assert_(result.dtype == object)
+
+    def test_convert_objects(self):
+
+        s = Series([1., 2, 3],index=['a','b','c'])
+        result = s.convert_objects(convert_dates=False,convert_numeric=True)
+        assert_series_equal(s,result)
+
+        # force numeric conversion
+        r = s.copy().astype('O')
+        r['a'] = '1'
+        result = r.convert_objects(convert_dates=False,convert_numeric=True)
+        assert_series_equal(s,result)
+
+        r = s.copy().astype('O')
+        r['a'] = '1.'
+        result = r.convert_objects(convert_dates=False,convert_numeric=True)
+        assert_series_equal(s,result)
+
+        r = s.copy().astype('O')
+        r['a'] = 'garbled'
+        expected = s.copy()
+        expected['a'] = np.nan
+        result = r.convert_objects(convert_dates=False,convert_numeric=True)
+        assert_series_equal(expected,result)
+
+        # dates
+        s = Series([datetime(2001,1,1,0,0), datetime(2001,1,2,0,0), datetime(2001,1,3,0,0) ])
+        s2 = Series([datetime(2001,1,1,0,0), datetime(2001,1,2,0,0), datetime(2001,1,3,0,0), 'foo', 1.0, 1, Timestamp('20010104'), '20010105'],dtype='O')
+
+        result = s.convert_objects(convert_dates=True,convert_numeric=False)
+        expected = Series([Timestamp('20010101'),Timestamp('20010102'),Timestamp('20010103')],dtype='M8[ns]')
+        assert_series_equal(expected,result)
+
+        result = s.convert_objects(convert_dates='coerce',convert_numeric=False)
+        assert_series_equal(expected,result)
+        result = s.convert_objects(convert_dates='coerce',convert_numeric=True)
+        assert_series_equal(expected,result)
+
+        expected = Series([Timestamp('20010101'),Timestamp('20010102'),Timestamp('20010103'),lib.NaT,lib.NaT,lib.NaT,Timestamp('20010104'),Timestamp('20010105')],dtype='M8[ns]')
+        result = s2.convert_objects(convert_dates='coerce',convert_numeric=False)
+        assert_series_equal(expected,result)
+        result = s2.convert_objects(convert_dates='coerce',convert_numeric=True)
+        assert_series_equal(expected,result)
+
+        # preserver all-nans (if convert_dates='coerce')
+        s = Series(['foo','bar',1,1.0],dtype='O')
+        result = s.convert_objects(convert_dates='coerce',convert_numeric=False)
+        assert_series_equal(result,s)
+
+        # preserver if non-object
+        s = Series([1],dtype='float32')
+        result = s.convert_objects(convert_dates='coerce',convert_numeric=False)
+        assert_series_equal(result,s)
+
+        #r = s.copy()
+        #r[0] = np.nan
+        #result = r.convert_objects(convert_dates=True,convert_numeric=False)
+        #self.assert_(result.dtype == 'M8[ns]')
 
     def test_apply_args(self):
         s = Series(['foo,bar'])
@@ -2945,9 +3557,8 @@ class TestSeries(unittest.TestCase, CheckNameIntegration):
     def test_rename_inplace(self):
         renamer = lambda x: x.strftime('%Y%m%d')
         expected = renamer(self.ts.index[0])
-        res = self.ts.rename(renamer, inplace=True)
 
-        self.assertTrue(res is None)
+        self.ts.rename(renamer, inplace=True)
         self.assertEqual(self.ts.index[0], expected)
 
     def test_preserveRefs(self):
@@ -2965,8 +3576,7 @@ class TestSeries(unittest.TestCase, CheckNameIntegration):
         x = TimeSeries([np.nan, 1., np.nan, 3., np.nan],
                        ['z', 'a', 'b', 'c', 'd'], dtype=float)
 
-        res = x.fillna(method='pad', inplace=True)
-        self.assertTrue(res is None)
+        x.fillna(method='pad', inplace=True)
 
         expected = TimeSeries([np.nan, 1.0, 1.0, 3.0, 3.0],
                               ['z', 'a', 'b', 'c', 'd'], dtype=float)
@@ -3017,10 +3627,10 @@ class TestSeries(unittest.TestCase, CheckNameIntegration):
 
     def test_fillna_int(self):
         s = Series(np.random.randint(-100, 100, 50))
-        self.assert_(s.fillna(method='ffill', inplace=True) is None)
+        s.fillna(method='ffill', inplace=True)
         assert_series_equal(s.fillna(method='ffill', inplace=False), s)
 
-#-------------------------------------------------------------------------------
+#------------------------------------------------------------------------------
 # TimeSeries-specific
 
     def test_fillna(self):
@@ -3054,8 +3664,7 @@ class TestSeries(unittest.TestCase, CheckNameIntegration):
         x = Series([nan, 1., nan, 3., nan], ['z', 'a', 'b', 'c', 'd'])
         y = x.copy()
 
-        res = y.fillna(value=0, inplace=True)
-        self.assert_(res is None)
+        y.fillna(value=0, inplace=True)
 
         expected = x.fillna(value=0)
         assert_series_equal(y, expected)
@@ -3083,8 +3692,7 @@ class TestSeries(unittest.TestCase, CheckNameIntegration):
         ser[6:10] = 0
 
         # replace list with a single value
-        rs = ser.replace([np.nan], -1, inplace=True)
-        self.assertTrue(rs is None)
+        ser.replace([np.nan], -1, inplace=True)
 
         exp = ser.fillna(-1)
         assert_series_equal(ser, exp)
@@ -3130,9 +3738,7 @@ class TestSeries(unittest.TestCase, CheckNameIntegration):
         assert_almost_equal(rs4[4], ser[5])
 
         # replace inplace
-        res = ser.replace([np.nan, 'foo', 'bar'], -1, inplace=True)
-
-        self.assertTrue(res is None)
+        ser.replace([np.nan, 'foo', 'bar'], -1, inplace=True)
 
         self.assert_((ser[:5] == -1).all())
         self.assert_((ser[6:10] == -1).all())
@@ -3211,9 +3817,9 @@ class TestSeries(unittest.TestCase, CheckNameIntegration):
         expected = s.copy()
         bad = isnull(expected.values)
         good = -bad
-        expected[bad] = np.interp(vals[bad], vals[good], s.values[good])
+        expected = Series(np.interp(vals[bad], vals[good], s.values[good]), index=s.index[bad])
 
-        assert_series_equal(result, expected)
+        assert_series_equal(result[bad], expected)
 
     def test_weekday(self):
         # Just run the function
@@ -3287,7 +3893,7 @@ class TestSeries(unittest.TestCase, CheckNameIntegration):
         expected = self.ts.values[:, np.newaxis]
         assert_almost_equal(result, expected)
 
-#-------------------------------------------------------------------------------
+#------------------------------------------------------------------------------
 # GroupBy
 
     def test_select(self):
@@ -3300,7 +3906,7 @@ class TestSeries(unittest.TestCase, CheckNameIntegration):
         expected = self.ts[self.ts.weekday == 2]
         assert_series_equal(result, expected)
 
-#----------------------------------------------------------------------
+#------------------------------------------------------------------------------
 # Misc not safe for sparse
 
     def test_dropna_preserve_name(self):
@@ -3388,8 +3994,7 @@ class TestSeriesNonUnique(unittest.TestCase):
         # check inplace
         s = ser.reset_index(drop=True)
         s2 = ser
-        res = s2.reset_index(drop=True, inplace=True)
-        self.assertTrue(res is None)
+        s2.reset_index(drop=True, inplace=True)
         assert_series_equal(s, s2)
 
         # level

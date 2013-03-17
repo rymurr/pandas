@@ -48,7 +48,8 @@ def _maybe_get_tz(tz):
     return tz
 
 
-def to_datetime(arg, errors='ignore', dayfirst=False, utc=None, box=True):
+def to_datetime(arg, errors='ignore', dayfirst=False, utc=None, box=True,
+                format=None):
     """
     Convert argument to datetime
 
@@ -72,8 +73,11 @@ def to_datetime(arg, errors='ignore', dayfirst=False, utc=None, box=True):
         arg = com._ensure_object(arg)
 
         try:
-            result = tslib.array_to_datetime(arg, raise_=errors == 'raise',
-                                             utc=utc, dayfirst=dayfirst)
+            if format is not None:
+                result = tslib.array_strptime(arg, format)
+            else:
+                result = tslib.array_to_datetime(arg, raise_=errors == 'raise',
+                                                 utc=utc, dayfirst=dayfirst)
             if com.is_datetime64_dtype(result) and box:
                 result = DatetimeIndex(result, tz='utc' if utc else None)
             return result
@@ -89,7 +93,9 @@ def to_datetime(arg, errors='ignore', dayfirst=False, utc=None, box=True):
     elif isinstance(arg, datetime):
         return arg
     elif isinstance(arg, Series):
-        values = _convert_f(arg.values)
+        values = arg.values
+        if not com.is_datetime64_dtype(values):
+            values = _convert_f(values)
         return Series(values, index=arg.index, name=arg.name)
     elif isinstance(arg, (np.ndarray, list)):
         if isinstance(arg, list):

@@ -133,3 +133,7 @@ def init_service(http, service, version):
     version : api version. eg 'v2'
     """
     return gapi.build(service, version, http=http)
+
+def reset_default_token_store():
+    import os
+    os.remove(DEFAULT_TOKEN_FILE)

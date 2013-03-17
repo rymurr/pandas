@@ -13,7 +13,7 @@ import pandas.core.common as com
 from pandas.core.index import MultiIndex
 from pandas.core.series import Series, remove_na
 from pandas.tseries.index import DatetimeIndex
-from pandas.tseries.period import PeriodIndex
+from pandas.tseries.period import PeriodIndex, Period
 from pandas.tseries.frequencies import get_period_alias, get_base_alias
 from pandas.tseries.offsets import DateOffset
 
@@ -520,12 +520,13 @@ def parallel_coordinates(data, class_column, cols=None, ax=None, colors=None,
     return ax
 
 
-def lag_plot(series, ax=None, **kwds):
+def lag_plot(series, lag=1, ax=None, **kwds):
     """Lag plot for time series.
 
     Parameters:
     -----------
     series: Time series
+    lag: lag of the scatter plot, default 1
     ax: Matplotlib axis object, optional
     kwds: Matplotlib scatter method keyword arguments, optional
 
@@ -535,12 +536,12 @@ def lag_plot(series, ax=None, **kwds):
     """
     import matplotlib.pyplot as plt
     data = series.values
-    y1 = data[:-1]
-    y2 = data[1:]
+    y1 = data[:-lag]
+    y2 = data[lag:]
     if ax is None:
         ax = plt.gca()
     ax.set_xlabel("y(t)")
-    ax.set_ylabel("y(t + 1)")
+    ax.set_ylabel("y(t + %s)" % lag)
     ax.scatter(y1, y2, **kwds)
     return ax
 
@@ -870,9 +871,9 @@ class MPLPlot(object):
 
         if self.use_index:
             if convert_period and isinstance(index, PeriodIndex):
-                index = index.to_timestamp()
+                index = index.to_timestamp().order()
                 x = index._mpl_repr()
-            elif index.is_numeric() or is_datetype:
+            elif index.is_numeric():
                 """
                 Matplotlib supports numeric values or datetime objects as
                 xaxis values. Taking LBYL approach here, by the time
@@ -880,6 +881,8 @@ class MPLPlot(object):
                 values for xaxis, several actions are already taken by plt.
                 """
                 x = index._mpl_repr()
+            elif is_datetype:
+                x = index.order()._mpl_repr()
             else:
                 self._need_to_set_index = True
                 x = range(len(index))
@@ -1027,7 +1030,21 @@ class LinePlot(MPLPlot):
         else:
             freq = get_base_alias(freq)
         freq = get_period_alias(freq)
-        return freq is not None
+        return freq is not None and self._no_base(freq)
+
+    def _no_base(self, freq):
+        # hack this for 0.10.1, creating more technical debt...sigh
+        from pandas.core.frame import DataFrame
+        if (isinstance(self.data, (Series, DataFrame))
+            and isinstance(self.data.index, DatetimeIndex)):
+            import pandas.tseries.frequencies as freqmod
+            base = freqmod.get_freq(freq)
+            x = self.data.index
+            if (base <= freqmod.FreqGroup.FR_DAY):
+                return x[:1].is_normalized
+
+            return Period(x[0], freq).to_timestamp(tz=x.tz) == x[0]
+        return True
 
     def _use_dynamic_x(self):
         freq = self._index_freq()
@@ -1368,7 +1385,7 @@ def plot_frame(frame=None, x=None, y=None, subplots=False, sharex=True,
         Sort column names to determine plot ordering
     title : string
         Title to use for the plot
-    grid : boolean, default True
+    grid : boolean, default False
         Axis grid lines
     legend : boolean, default True
         Place legend on axis subplots
@@ -1376,9 +1393,10 @@ def plot_frame(frame=None, x=None, y=None, subplots=False, sharex=True,
     ax : matplotlib axis object, default None
     style : list or dict
         matplotlib line style per column
-    kind : {'line', 'bar', 'barh'}
+    kind : {'line', 'bar', 'barh', 'kde', 'density'}
         bar : vertical bar plot
         barh : horizontal bar plot
+        kde/density : Kernel Density Estimation plot
     logx : boolean, default False
         For line plots, use log scaling on x axis
     logy : boolean, default False
@@ -1456,31 +1474,32 @@ def plot_series(series, label=None, kind='line', use_index=True, rot=None,
     Parameters
     ----------
     label : label argument to provide to plot
-    kind : {'line', 'bar', 'barh'}
+    kind : {'line', 'bar', 'barh', 'kde', 'density'}
         bar : vertical bar plot
         barh : horizontal bar plot
-    rot : int, default 30
-        Rotation for tick labels
+        kde/density : Kernel Density Estimation plot
     use_index : boolean, default True
         Plot index as axis tick labels
-    ax : matplotlib axis object
-        If not passed, uses gca()
-    style : string, default matplotlib default
-        matplotlib line style to use
-    ax : matplotlib axis object
-        If not passed, uses gca()
-    logx : boolean, default False
-        For line plots, use log scaling on x axis
-    logy : boolean, default False
-        For line plots, use log scaling on y axis
+    rot : int, default None
+        Rotation for tick labels
     xticks : sequence
         Values to use for the xticks
     yticks : sequence
         Values to use for the yticks
     xlim : 2-tuple/list
     ylim : 2-tuple/list
-    rot : int, default None
-        Rotation for ticks
+    ax : matplotlib axis object
+        If not passed, uses gca()
+    style : string, default matplotlib default
+        matplotlib line style to use
+    grid : matplot grid
+    legend: matplot legende
+    logx : boolean, default False
+        For line plots, use log scaling on x axis
+    logy : boolean, default False
+        For line plots, use log scaling on y axis
+    secondary_y : boolean or sequence of ints, default False
+        If True then y-axis will be on the right
     kwds : keywords
         Options to pass to matplotlib plotting method
 

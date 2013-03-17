@@ -12,8 +12,8 @@ import pandas.algos as _algos
 import pandas.index as _index
 from pandas.lib import Timestamp
 
-from pandas.core.common import ndtake
 from pandas.util.decorators import cache_readonly
+from pandas.core.common import isnull
 import pandas.core.common as com
 from pandas.util import py3compat
 from pandas.core.config import get_option
@@ -95,6 +95,8 @@ class Index(np.ndarray):
                     return Index(result.to_pydatetime(), dtype=_o_dtype)
                 else:
                     return result
+            elif issubclass(data.dtype.type, np.timedelta64):
+                return Int64Index(data, copy=copy, name=name)
 
             if dtype is not None:
                 try:
@@ -171,9 +173,9 @@ class Index(np.ndarray):
         Invoked by unicode(df) in py2 only. Yields a Unicode String in both py2/py3.
         """
         if len(self) > 6 and len(self) > np.get_printoptions()['threshold']:
-            data = self[:3].tolist() + ["..."] + self[-3:].tolist()
+            data = self[:3].format() + ["..."] + self[-3:].format()
         else:
-            data = self
+            data = self.format()
 
         prepr = com.pprint_thing(data, escape_chars=('\t', '\r', '\n'))
         return '%s(%s, dtype=%s)' % (type(self).__name__, prepr, self.dtype)
@@ -245,8 +247,14 @@ class Index(np.ndarray):
 
     def summary(self, name=None):
         if len(self) > 0:
-            index_summary = ', %s to %s' % (com.pprint_thing(self[0]),
-                                            com.pprint_thing(self[-1]))
+            head = self[0]
+            if hasattr(head,'format'):
+                head = head.format()
+            tail = self[-1]
+            if hasattr(tail,'format'):
+                tail = tail.format()
+            index_summary = ', %s to %s' % (com.pprint_thing(head),
+                                            com.pprint_thing(tail))
         else:
             index_summary = ''
 
@@ -417,7 +425,7 @@ class Index(np.ndarray):
         taken = self.view(np.ndarray).take(indexer)
         return self._constructor(taken, name=self.name)
 
-    def format(self, name=False, formatter=None):
+    def format(self, name=False, formatter=None, na_rep='NaN'):
         """
         Render a string representation of the Index
         """
@@ -436,9 +444,12 @@ class Index(np.ndarray):
             zero_time = time(0, 0)
             result = []
             for dt in self:
-                if dt.time() != zero_time or dt.tzinfo is not None:
-                    return header + [u'%s' % x for x in self]
-                result.append(u'%d-%.2d-%.2d' % (dt.year, dt.month, dt.day))
+                if isnull(dt):
+                    result.append(u'NaT')
+                else:
+                    if dt.time() != zero_time or dt.tzinfo is not None:
+                        return header + [u'%s' % x for x in self]
+                    result.append(u'%d-%.2d-%.2d' % (dt.year, dt.month, dt.day))
             return header + result
 
         values = self.values
@@ -449,6 +460,14 @@ class Index(np.ndarray):
         if values.dtype == np.object_:
             result = [com.pprint_thing(x, escape_chars=('\t', '\r', '\n'))
                       for x in values]
+
+            # could have nans
+            mask = isnull(values)
+            if mask.any():
+                result = np.array(result)
+                result[mask] = na_rep
+                result = result.tolist()
+
         else:
             result = _trim_front(format_array(values, None, justify='left'))
         return header + result
@@ -608,7 +627,8 @@ class Index(np.ndarray):
             indexer = (indexer == -1).nonzero()[0]
 
             if len(indexer) > 0:
-                other_diff = ndtake(other.values, indexer)
+                other_diff = com.take_nd(other.values, indexer,
+                                         allow_fill=False)
                 result = com._concat_compat((self.values, other_diff))
                 try:
                     result.sort()
@@ -1037,7 +1057,8 @@ class Index(np.ndarray):
             rev_indexer = lib.get_reverse_indexer(left_lev_indexer,
                                                   len(old_level))
 
-            new_lev_labels = ndtake(rev_indexer, left.labels[level])
+            new_lev_labels = com.take_nd(rev_indexer, left.labels[level],
+                                         allow_fill=False)
             omit_mask = new_lev_labels != -1
 
             new_labels = list(left.labels)
@@ -1057,8 +1078,9 @@ class Index(np.ndarray):
             left_indexer = None
 
         if right_lev_indexer is not None:
-            right_indexer = ndtake(right_lev_indexer,
-                                   join_index.labels[level])
+            right_indexer = com.take_nd(right_lev_indexer,
+                                        join_index.labels[level],
+                                        allow_fill=False)
         else:
             right_indexer = join_index.labels[level]
 
@@ -1117,6 +1139,30 @@ class Index(np.ndarray):
         name = self.name if self.name == other.name else None
         return Index(joined, name=name)
 
+    def slice_indexer(self, start=None, end=None, step=None):
+        """
+        For an ordered Index, compute the slice indexer for input labels and
+        step
+
+        Parameters
+        ----------
+        start : label, default None
+            If None, defaults to the beginning
+        end : label, default None
+            If None, defaults to the end
+        step : int, default None 
+
+        Returns
+        -------
+        indexer : ndarray or slice
+
+        Notes
+        -----
+        This function assumes that the data is sorted, so use at your own peril
+        """
+        start_slice, end_slice = self.slice_locs(start, end)
+        return slice(start_slice, end_slice, step)
+
     def slice_locs(self, start=None, end=None):
         """
         For an ordered Index, compute the slice locations for input labels
@@ -1125,27 +1171,27 @@ class Index(np.ndarray):
         ----------
         start : label, default None
             If None, defaults to the beginning
-        end : label
+        end : label, default None
             If None, defaults to the end
 
         Returns
         -------
-        (begin, end) : (int, int)
+        (start, end) : (int, int)
 
         Notes
         -----
         This function assumes that the data is sorted, so use at your own peril
         """
         if start is None:
-            beg_slice = 0
+            start_slice = 0
         else:
             try:
-                beg_slice = self.get_loc(start)
-                if isinstance(beg_slice, slice):
-                    beg_slice = beg_slice.start
+                start_slice = self.get_loc(start)
+                if isinstance(start_slice, slice):
+                    start_slice = start_slice.start
             except KeyError:
                 if self.is_monotonic:
-                    beg_slice = self.searchsorted(start, side='left')
+                    start_slice = self.searchsorted(start, side='left')
                 else:
                     raise
 
@@ -1164,7 +1210,7 @@ class Index(np.ndarray):
                 else:
                     raise
 
-        return beg_slice, end_slice
+        return start_slice, end_slice
 
     def delete(self, loc):
         """
@@ -1414,10 +1460,9 @@ class MultiIndex(Index):
         np.set_printoptions(threshold=50)
 
         if len(self) > 100:
-            values = np.concatenate([self[:50].values,
-                                     self[-50:].values])
+            values = self[:50].format() + self[-50:].format()
         else:
-            values = self.values
+            values = self.format()
 
         summary = com.pprint_thing(values, escape_chars=('\t', '\r', '\n'))
 
@@ -1586,7 +1631,16 @@ class MultiIndex(Index):
         stringified_levels = []
         for lev, lab in zip(self.levels, self.labels):
             if len(lev) > 0:
+
                 formatted = lev.take(lab).format(formatter=formatter)
+
+                # we have some NA
+                mask = lab==-1
+                if mask.any():
+                    formatted = np.array(formatted)
+                    formatted[mask] = na_rep
+                    formatted = formatted.tolist()
+
             else:
                 # weird all NA case
                 formatted = [com.pprint_thing(x, escape_chars=('\t', '\r', '\n'))
@@ -1898,6 +1952,11 @@ class MultiIndex(Index):
         """
         Swap level i with level j. Do not change the ordering of anything
 
+        Parameters
+        ----------
+        i, j : int, string (can be mixed)
+            Level of index to be swapped. Can pass level name as string.
+
         Returns
         -------
         swapped : MultiIndex
@@ -2101,7 +2160,7 @@ class MultiIndex(Index):
 
         Returns
         -------
-        (begin, end) : (int, int)
+        (start, end) : (int, int)
 
         Notes
         -----
@@ -2340,8 +2399,10 @@ class MultiIndex(Index):
             return False
 
         for i in xrange(self.nlevels):
-            svalues = ndtake(self.levels[i].values, self.labels[i])
-            ovalues = ndtake(other.levels[i].values, other.labels[i])
+            svalues = com.take_nd(self.levels[i].values, self.labels[i],
+                                  allow_fill=False)
+            ovalues = com.take_nd(other.levels[i].values, other.labels[i],
+                                  allow_fill=False)
             if not np.array_equal(svalues, ovalues):
                 return False
 

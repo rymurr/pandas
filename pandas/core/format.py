@@ -66,7 +66,7 @@ docstring_to_string = """
 class SeriesFormatter(object):
 
     def __init__(self, series, buf=None, header=True, length=True,
-                 na_rep='NaN', name=False, float_format=None):
+                 na_rep='NaN', name=False, float_format=None, dtype=True):
         self.series = series
         self.buf = buf if buf is not None else StringIO(u"")
         self.name = name
@@ -77,6 +77,7 @@ class SeriesFormatter(object):
         if float_format is None:
             float_format = get_option("display.float_format")
         self.float_format = float_format
+        self.dtype  = dtype
 
     def _get_footer(self):
         footer = u''
@@ -97,6 +98,12 @@ class SeriesFormatter(object):
             if footer:
                 footer += ', '
             footer += 'Length: %d' % len(self.series)
+
+        if self.dtype:
+            if getattr(self.series.dtype,'name',None):
+                if footer:
+                    footer += ', '
+                footer += 'dtype: %s' % com.pprint_thing(self.series.dtype.name)
 
         return unicode(footer)
 
@@ -486,20 +493,11 @@ class HTMLFormatter(TableFormatter):
         self.frame = self.fmt.frame
         self.columns = formatter.columns
         self.elements = []
-
-        _bold_row = self.fmt.kwds.get('bold_rows', False)
-        _temp = '<strong>%s</strong>'
-
-        def _maybe_bold_row(x):
-            if _bold_row:
-                return ([_temp % y for y in x] if isinstance(x, tuple)
-                        else _temp % x)
-            else:
-                return x
-        self._maybe_bold_row = _maybe_bold_row
+        self.bold_rows = self.fmt.kwds.get('bold_rows', False)
 
     def write(self, s, indent=0):
-        self.elements.append(' ' * indent + com.pprint_thing(s))
+        rs = com.pprint_thing(s)
+        self.elements.append(' ' * indent + rs)
 
     def write_th(self, s, indent=0, tags=None):
         if (self.fmt.col_space is not None
@@ -517,11 +515,14 @@ class HTMLFormatter(TableFormatter):
             start_tag = '<%s %s>' % (kind, tags)
         else:
             start_tag = '<%s>' % kind
+
+        esc = {'<' : r'&lt;', '>' : r'&gt;'}
+        rs = com.pprint_thing(s, escape_chars=esc)
         self.write(
-            '%s%s</%s>' % (start_tag, com.pprint_thing(s), kind), indent)
+            '%s%s</%s>' % (start_tag, rs, kind), indent)
 
     def write_tr(self, line, indent=0, indent_delta=4, header=False,
-                 align=None, tags=None):
+                 align=None, tags=None, nindex_levels=0):
         if tags is None:
             tags = {}
 
@@ -533,7 +534,7 @@ class HTMLFormatter(TableFormatter):
 
         for i, s in enumerate(line):
             val_tag = tags.get(i, None)
-            if header:
+            if header or (self.bold_rows and i < nindex_levels):
                 self.write_th(s, indent, tags=val_tag)
             else:
                 self.write_td(s, indent, tags=val_tag)
@@ -683,9 +684,10 @@ class HTMLFormatter(TableFormatter):
 
         for i in range(len(self.frame)):
             row = []
-            row.append(self._maybe_bold_row(index_values[i]))
+            row.append(index_values[i])
             row.extend(fmt_values[j][i] for j in range(ncols))
-            self.write_tr(row, indent, self.indent_delta, tags=None)
+            self.write_tr(row, indent, self.indent_delta, tags=None,
+                          nindex_levels=1)
 
     def _write_hierarchical_rows(self, fmt_values, indent):
         template = 'rowspan="%d" valign="top"'
@@ -706,27 +708,32 @@ class HTMLFormatter(TableFormatter):
                 row = []
                 tags = {}
 
+                sparse_offset = 0
                 j = 0
                 for records, v in zip(level_lengths, idx_values[i]):
                     if i in records:
                         if records[i] > 1:
                             tags[j] = template % records[i]
                     else:
+                        sparse_offset += 1
                         continue
+
                     j += 1
-                    row.append(self._maybe_bold_row(v))
+                    row.append(v)
 
                 row.extend(fmt_values[j][i] for j in range(ncols))
-                self.write_tr(row, indent, self.indent_delta, tags=tags)
+                self.write_tr(row, indent, self.indent_delta, tags=tags,
+                              nindex_levels=len(levels) - sparse_offset)
         else:
             for i in range(len(frame)):
                 idx_values = zip(*frame.index.format(sparsify=False,
                                                      adjoin=False,
                                                      names=False))
                 row = []
-                row.extend(self._maybe_bold_row(x) for x in idx_values[i])
+                row.extend(idx_values[i])
                 row.extend(fmt_values[j][i] for j in range(ncols))
-                self.write_tr(row, indent, self.indent_delta, tags=None)
+                self.write_tr(row, indent, self.indent_delta, tags=None,
+                              nindex_levels=len(frame.index.nlevels))
 
 
 def _get_level_lengths(levels):
@@ -1005,6 +1012,8 @@ def format_array(values, formatter, float_format=None, na_rep='NaN',
         fmt_klass = IntArrayFormatter
     elif com.is_datetime64_dtype(values.dtype):
         fmt_klass = Datetime64Formatter
+    elif com.is_timedelta64_dtype(values.dtype):
+        fmt_klass = Timedelta64Formatter
     else:
         fmt_klass = GenericArrayFormatter
 
@@ -1091,8 +1100,21 @@ class FloatArrayFormatter(GenericArrayFormatter):
             self.formatter = self.float_format
 
     def _format_with(self, fmt_str):
-        fmt_values = [fmt_str % x if notnull(x) else self.na_rep
-                      for x in self.values]
+        def _val(x, threshold):
+            if notnull(x):
+                if threshold is None or  abs(x) >  get_option("display.chop_threshold"):
+                    return  fmt_str % x
+                else:
+                    if fmt_str.endswith("e"): # engineering format
+                        return  "0"
+                    else:
+                        return  fmt_str % 0
+            else:
+
+                return self.na_rep
+
+        threshold = get_option("display.chop_threshold")
+        fmt_values = [ _val(x, threshold) for x in self.values]
         return _trim_zeros(fmt_values, self.na_rep)
 
     def get_result(self):
@@ -1150,7 +1172,6 @@ class Datetime64Formatter(GenericArrayFormatter):
         fmt_values = [formatter(x) for x in self.values]
         return _make_fixed_width(fmt_values, self.justify)
 
-
 def _format_datetime64(x, tz=None):
     if isnull(x):
         return 'NaT'
@@ -1158,6 +1179,24 @@ def _format_datetime64(x, tz=None):
     stamp = lib.Timestamp(x, tz=tz)
     return stamp._repr_base
 
+
+class Timedelta64Formatter(Datetime64Formatter):
+
+    def get_result(self):
+        if self.formatter:
+            formatter = self.formatter
+        else:
+
+            formatter = _format_timedelta64
+
+        fmt_values = [formatter(x) for x in self.values]
+        return _make_fixed_width(fmt_values, self.justify)
+
+def _format_timedelta64(x):
+    if isnull(x):
+        return 'NaT'
+
+    return lib.repr_timedelta64(x)
 
 def _make_fixed_width(strings, justify='right', minimum=None):
     if len(strings) == 0:

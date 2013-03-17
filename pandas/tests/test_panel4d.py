@@ -592,6 +592,13 @@ class TestPanel4d(unittest.TestCase, CheckIndexing, SafeForSparse,
         assert_almost_equal(casted.values, exp_values)
         assert_almost_equal(casted2.values, exp_values)
 
+        casted = Panel4D(zero_filled._data, dtype=np.int32)
+        casted2 = Panel4D(zero_filled.values, dtype=np.int32)
+
+        exp_values = zero_filled.values.astype(np.int32)
+        assert_almost_equal(casted.values, exp_values)
+        assert_almost_equal(casted2.values, exp_values)
+
         # can't cast
         data = [[['foo', 'bar', 'baz']]]
         self.assertRaises(ValueError, Panel, data, dtype=float)

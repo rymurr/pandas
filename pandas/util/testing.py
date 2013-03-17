@@ -14,7 +14,7 @@ from distutils.version import LooseVersion
 from numpy.random import randn
 import numpy as np
 
-from pandas.core.common import isnull
+from pandas.core.common import isnull, _is_sequence
 import pandas.core.index as index
 import pandas.core.series as series
 import pandas.core.frame as frame
@@ -88,7 +88,7 @@ def isiterable(obj):
     return hasattr(obj, '__iter__')
 
 
-def assert_almost_equal(a, b):
+def assert_almost_equal(a, b, check_less_precise = False):
     if isinstance(a, dict) or isinstance(b, dict):
         return assert_dict_equal(a, b)
 
@@ -103,7 +103,7 @@ def assert_almost_equal(a, b):
             return True
         else:
             for i in xrange(len(a)):
-                assert_almost_equal(a[i], b[i])
+                assert_almost_equal(a[i], b[i], check_less_precise)
         return True
 
     err_msg = lambda a, b: 'expected %.5f but got %.5f' % (a, b)
@@ -112,16 +112,29 @@ def assert_almost_equal(a, b):
         np.testing.assert_(isnull(b))
         return
 
-    if isinstance(a, (bool, float, int)):
+    if isinstance(a, (bool, float, int, np.float32)):
+        decimal = 5
+
+        # deal with differing dtypes
+        if check_less_precise:
+            dtype_a = np.dtype(a)
+            dtype_b = np.dtype(b)
+            if dtype_a.kind == 'i' and dtype_b == 'i':
+                pass
+            if dtype_a.kind == 'f' and dtype_b == 'f':
+                if dtype_a.itemsize <= 4 and dtype_b.itemsize <= 4:
+                    decimal = 3
+
         if np.isinf(a):
             assert np.isinf(b), err_msg(a, b)
+
         # case for zero
         elif abs(a) < 1e-5:
             np.testing.assert_almost_equal(
-                a, b, decimal=5, err_msg=err_msg(a, b), verbose=False)
+                a, b, decimal=decimal, err_msg=err_msg(a, b), verbose=False)
         else:
             np.testing.assert_almost_equal(
-                1, a / b, decimal=5, err_msg=err_msg(a, b), verbose=False)
+                1, a / b, decimal=decimal, err_msg=err_msg(a, b), verbose=False)
     else:
         assert(a == b)
 
@@ -144,10 +157,11 @@ def assert_dict_equal(a, b, compare_keys=True):
 def assert_series_equal(left, right, check_dtype=True,
                         check_index_type=False,
                         check_index_freq=False,
-                        check_series_type=False):
+                        check_series_type=False,
+                        check_less_precise=False):
     if check_series_type:
         assert(type(left) == type(right))
-    assert_almost_equal(left.values, right.values)
+    assert_almost_equal(left.values, right.values, check_less_precise)
     if check_dtype:
         assert(left.dtype == right.dtype)
     assert(left.index.equals(right.index))
@@ -160,9 +174,12 @@ def assert_series_equal(left, right, check_dtype=True,
                getattr(right, 'freqstr', None))
 
 
-def assert_frame_equal(left, right, check_index_type=False,
+def assert_frame_equal(left, right, check_dtype=True, 
+                       check_index_type=False,
                        check_column_type=False,
-                       check_frame_type=False):
+                       check_frame_type=False,
+                       check_less_precise=False,
+                       check_names=True):
     if check_frame_type:
         assert(type(left) == type(right))
     assert(isinstance(left, DataFrame))
@@ -175,7 +192,10 @@ def assert_frame_equal(left, right, check_index_type=False,
         assert(col in right)
         lcol = left.icol(i)
         rcol = right.icol(i)
-        assert_series_equal(lcol, rcol)
+        assert_series_equal(lcol, rcol, 
+                            check_dtype=check_dtype,
+                            check_index_type=check_index_type,
+                            check_less_precise=check_less_precise)
 
     if check_index_type:
         assert(type(left.index) == type(right.index))
@@ -185,9 +205,14 @@ def assert_frame_equal(left, right, check_index_type=False,
         assert(type(left.columns) == type(right.columns))
         assert(left.columns.dtype == right.columns.dtype)
         assert(left.columns.inferred_type == right.columns.inferred_type)
+    if check_names:
+        assert(left.index.names == right.index.names)
+        assert(left.columns.names == right.columns.names)
 
 
-def assert_panel_equal(left, right, check_panel_type=False):
+def assert_panel_equal(left, right, 
+                       check_panel_type=False,
+                       check_less_precise=False):
     if check_panel_type:
         assert(type(left) == type(right))
 
@@ -197,13 +222,14 @@ def assert_panel_equal(left, right, check_panel_type=False):
 
     for col, series in left.iterkv():
         assert(col in right)
-        assert_frame_equal(series, right[col])
+        assert_frame_equal(series, right[col], check_less_precise=check_less_precise, check_names=False)  # TODO strangely check_names fails in py3 ?
 
     for col in right:
         assert(col in left)
 
 
-def assert_panel4d_equal(left, right):
+def assert_panel4d_equal(left, right,
+                         check_less_precise=False):
     assert(left.labels.equals(right.labels))
     assert(left.items.equals(right.items))
     assert(left.major_axis.equals(right.major_axis))
@@ -211,7 +237,7 @@ def assert_panel4d_equal(left, right):
 
     for col, series in left.iterkv():
         assert(col in right)
-        assert_panel_equal(series, right[col])
+        assert_panel_equal(series, right[col], check_less_precise=check_less_precise)
 
     for col in right:
         assert(col in left)
@@ -353,6 +379,7 @@ def makeCustomIndex(nentries, nlevels, prefix='#', names=False, ndupe_l=None,
     ndupe_l - (Optional), list of ints, the number of rows for which the
        label will repeated at the corresponding level, you can specify just
        the first few, the rest will use the default ndupe_l of 1.
+       len(ndupe_l) <= nlevels.
     idx_type - "i"/"f"/"s"/"u"/"dt".
        If idx_type is not None, `idx_nlevels` must be 1.
        "i"/"f" creates an integer/float index,
@@ -364,8 +391,8 @@ def makeCustomIndex(nentries, nlevels, prefix='#', names=False, ndupe_l=None,
 
     from pandas.util.compat import Counter
     if ndupe_l is None:
-        ndupe_l = [1] * nentries
-    assert len(ndupe_l) <= nentries
+        ndupe_l = [1] * nlevels
+    assert (_is_sequence(ndupe_l) and len(ndupe_l) <= nlevels)
     assert (names is None or names is False
             or names is True or len(names) is nlevels)
     assert idx_type is None or \
@@ -395,14 +422,19 @@ def makeCustomIndex(nentries, nlevels, prefix='#', names=False, ndupe_l=None,
         raise ValueError('"%s" is not a legal value for `idx_type`, use  '
                          '"i"/"f"/"s"/"u"/"dt".' % idx_type)
 
-    if len(ndupe_l) < nentries:
-        ndupe_l.extend([1] * (nentries - len(ndupe_l)))
-    assert len(ndupe_l) == nentries
+    if len(ndupe_l) < nlevels:
+        ndupe_l.extend([1] * (nlevels - len(ndupe_l)))
+    assert len(ndupe_l) == nlevels
 
     assert all([x > 0 for x in ndupe_l])
 
     tuples = []
     for i in range(nlevels):
+        def keyfunc(x):
+            import re
+            numeric_tuple = re.sub("[^\d_]_?","",x).split("_")
+            return map(int,numeric_tuple)
+
         # build a list of lists to create the index from
         div_factor = nentries // ndupe_l[i] + 1
         cnt = Counter()
@@ -410,7 +442,7 @@ def makeCustomIndex(nentries, nlevels, prefix='#', names=False, ndupe_l=None,
             label = prefix + '_l%d_g' % i + str(j)
             cnt[label] = ndupe_l[i]
         # cute Counter trick
-        result = list(sorted(cnt.elements()))[:nentries]
+        result = list(sorted(cnt.elements(), key=keyfunc))[:nentries]
         tuples.append(result)
 
     tuples = zip(*tuples)
@@ -476,6 +508,7 @@ def makeCustomDataframe(nrows, ncols, c_idx_names=True, r_idx_names=True,
                              r_idx_names=["FEE","FI","FO","FAM"],
                              c_idx_nlevels=2)
 
+    >> a=mkdf(5,3,r_idx_nlevels=2,c_idx_nlevels=4)
     """
 
     assert c_idx_nlevels > 0

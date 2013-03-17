@@ -54,6 +54,9 @@ bar2,12,13,14,15
         raise NotImplementedError
 
     def setUp(self):
+        import warnings
+        warnings.filterwarnings(action='ignore', category=FutureWarning)
+
         self.dirpath = curpath()
         self.csv1 = os.path.join(self.dirpath, 'test1.csv')
         self.csv2 = os.path.join(self.dirpath, 'test2.csv')
@@ -362,6 +365,21 @@ KORD6,19990127, 23:00:00, 22:56:00, -0.5900, 1.7100, 4.6000, 0.0000, 280.0000"""
         tm.assert_frame_equal(rs, xp)
         self.assert_(rs.index.name == xp.index.name)
 
+    def test_date_parser_int_bug(self):
+        # #3071
+        log_file = StringIO(
+            'posix_timestamp,elapsed,sys,user,queries,query_time,rows,'
+                'accountid,userid,contactid,level,silo,method\n'
+            '1343103150,0.062353,0,4,6,0.01690,3,'
+                '12345,1,-1,3,invoice_InvoiceResource,search\n'
+        )
+
+        def f(posix_string):
+            return datetime.utcfromtimestamp(int(posix_string))
+
+        # it works!
+        read_csv(log_file, index_col=0, parse_dates=0, date_parser=f)
+
     def test_multiple_skts_example(self):
         data = "year, month, a, b\n 2001, 01, 0.0, 10.\n 2001, 02, 1.1, 11."
         pass
@@ -511,6 +529,7 @@ ignore,this,row
                              columns=[1, 2, 3],
                              index=[datetime(2000, 1, 1), datetime(2000, 1, 2),
                                     datetime(2000, 1, 3)])
+        expected.index.name = 0
         tm.assert_frame_equal(data, expected)
         tm.assert_frame_equal(data, data2)
 
@@ -624,7 +643,7 @@ c,4,5
         idx = DatetimeIndex([datetime(2009, 1, 31, 0, 10, 0),
                              datetime(2009, 2, 28, 10, 20, 0),
                              datetime(2009, 3, 31, 8, 30, 0)]).asobject
-        idx.name = 'date'
+        idx.name = 'date_time'
         xp = DataFrame({'B': [1, 3, 5], 'C': [2, 4, 6]}, idx)
         tm.assert_frame_equal(rs, xp)
 
@@ -633,7 +652,7 @@ c,4,5
         idx = DatetimeIndex([datetime(2009, 1, 31, 0, 10, 0),
                              datetime(2009, 2, 28, 10, 20, 0),
                              datetime(2009, 3, 31, 8, 30, 0)]).asobject
-        idx.name = 'date'
+        idx.name = 'date_time'
         xp = DataFrame({'B': [1, 3, 5], 'C': [2, 4, 6]}, idx)
         tm.assert_frame_equal(rs, xp)
 
@@ -964,7 +983,7 @@ bar,two,12,13,14,15
         df = self.read_csv(StringIO(no_header), index_col=[0, 1],
                            header=None, names=names)
         expected = self.read_csv(StringIO(data), index_col=[0, 1])
-        tm.assert_frame_equal(df, expected)
+        tm.assert_frame_equal(df, expected, check_names=False)
 
         # 2 implicit first cols
         df2 = self.read_csv(StringIO(data2))
@@ -974,7 +993,7 @@ bar,two,12,13,14,15
         df = self.read_csv(StringIO(no_header), index_col=[1, 0], names=names,
                            header=None)
         expected = self.read_csv(StringIO(data), index_col=[1, 0])
-        tm.assert_frame_equal(df, expected)
+        tm.assert_frame_equal(df, expected, check_names=False)
 
     def test_multi_index_parse_dates(self):
         data = """index1,index2,A,B,C
@@ -1159,11 +1178,13 @@ a,b,c,d
 
         xp = DataFrame({'b': [np.nan], 'd': [5]},
                        MultiIndex.from_tuples([(0, 1)]))
+        xp.index.names = ['a', 'c']
         df = self.read_csv(StringIO(data), na_values={}, index_col=[0, 2])
         tm.assert_frame_equal(df, xp)
 
         xp = DataFrame({'b': [np.nan], 'd': [5]},
                        MultiIndex.from_tuples([(0, 1)]))
+        xp.index.names = ['a', 'c']
         df = self.read_csv(StringIO(data), na_values={}, index_col=['a', 'c'])
         tm.assert_frame_equal(df, xp)
 
@@ -1246,7 +1267,7 @@ KORD6,19990127, 23:00:00, 22:56:00, -0.5900, 1.7100, 4.6000, 0.0000, 280.0000"""
         tm.assert_frame_equal(df2, df)
 
         df3 = self.read_csv(StringIO(data), parse_dates=[[1, 2]], index_col=0)
-        tm.assert_frame_equal(df3, df)
+        tm.assert_frame_equal(df3, df, check_names=False)
 
     def test_multiple_date_cols_chunked(self):
         df = self.read_csv(StringIO(self.ts_data), parse_dates={
@@ -1855,6 +1876,37 @@ a,b,c
         self.assertRaises(ValueError, self.read_csv, StringIO(data),
                           names=['a', 'b'], usecols=[1], header=None)
 
+    def test_usecols_implicit_index_col(self):
+        # #2654
+        data = 'a,b,c\n4,apple,bat,5.7\n8,orange,cow,10'
+
+        result = self.read_csv(StringIO(data), usecols=['a', 'b'])
+        expected = DataFrame({'a': ['apple', 'orange'],
+                              'b': ['bat', 'cow']}, index=[4, 8])
+
+        tm.assert_frame_equal(result, expected)
+
+    def test_usecols_with_whitespace(self):
+        data = 'a  b  c\n4  apple  bat  5.7\n8  orange  cow  10'
+
+        result = self.read_csv(StringIO(data), delim_whitespace=True,
+                               usecols=('a', 'b'))
+        expected = DataFrame({'a': ['apple', 'orange'],
+                              'b': ['bat', 'cow']}, index=[4, 8])
+
+        tm.assert_frame_equal(result, expected)
+
+    def test_usecols_regex_sep(self):
+        # #2733
+        data = 'a  b  c\n4  apple  bat  5.7\n8  orange  cow  10'
+
+        self.assertRaises(Exception, self.read_csv, StringIO(data),
+                          sep='\s+', usecols=('a', 'b'))
+
+        # expected = DataFrame({'a': ['apple', 'orange'],
+        #                       'b': ['bat', 'cow']}, index=[4, 8])
+        # tm.assert_frame_equal(result, expected)
+
     def test_pure_python_failover(self):
         data = "a,b,c\n1,2,3#ignore this!\n4,5,6#ignorethistoo"
 
@@ -2006,6 +2058,25 @@ No,No,No"""
         data2 = data.replace('~', '~~')
         result = self.assertRaises(ValueError, read_csv, StringIO(data2),
                                    lineterminator='~~')
+
+    def test_raise_on_passed_int_dtype_with_nas(self):
+        # #2631
+        data = """YEAR, DOY, a
+2001,106380451,10
+2001,,11
+2001,106380451,67"""
+        self.assertRaises(Exception, read_csv, StringIO(data), sep=",",
+                          skipinitialspace=True,
+                          dtype={'DOY': np.int64})
+
+    def test_na_trailing_columns(self):
+        data = """Date,Currenncy,Symbol,Type,Units,UnitPrice,Cost,Tax
+2012-03-14,USD,AAPL,BUY,1000
+2012-05-12,USD,SBUX,SELL,500"""
+
+        result = self.read_csv(StringIO(data))
+        self.assertEquals(result['Date'][1], '2012-05-12')
+        self.assertTrue(result['UnitPrice'].isnull().all())
 
 
 class TestParseSQL(unittest.TestCase):
